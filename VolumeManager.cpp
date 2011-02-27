@@ -30,7 +30,7 @@
 #include <openssl/md5.h>
 
 #include <cutils/log.h>
-
+#include <cutils/properties.h>
 #include <sysutils/NetlinkEvent.h>
 
 #include "VolumeManager.h"
@@ -44,6 +44,7 @@
 
 VolumeManager *VolumeManager::sInstance = NULL;
 static const char lunFile[] = "/sys/devices/platform/musb_hdrc/gadget/lun0/file";
+static int umsMinorAdjustment = 0;
 
 VolumeManager *VolumeManager::Instance() {
     if (!sInstance)
@@ -63,6 +64,12 @@ VolumeManager::VolumeManager() {
     // set dirty ratio to 0 when UMS is active
     mUmsDirtyRatio = 0;
 
+    // read adjustment for device minor number for UMS
+    char propValue[PROPERTY_VALUE_MAX];
+    if (property_get("ro.ums.minor-adjustment", propValue, NULL))
+        sscanf(propValue, "%d", &umsMinorAdjustment);
+    LOGD("Using umsMinorAdjustment=%d", umsMinorAdjustment);
+
     readInitialState();
 }
 
@@ -75,7 +82,8 @@ void VolumeManager::readInitialState() {
      */
     if ((fp = fopen("/sys/devices/virtual/usb_composite/usb_mass_storage/enable", "r"))) {
         if (fgets(state, sizeof(state), fp)) {
-            mUsbMassStorageEnabled = !strncmp(state, "1", 1);
+            //mUsbMassStorageEnabled = !strncmp(state, "1", 1);
+            mUsbMassStorageEnabled = true;
         } else {
             SLOGE("Failed to read usb_mass_storage enabled state (%s)", strerror(errno));
         }
@@ -87,7 +95,7 @@ void VolumeManager::readInitialState() {
     /*
      * Read the initial USB connected state
      */
-    if ((fp = fopen("/sys/devices/virtual/switch/usb_configuration/state", "r"))) {
+    if ((fp = fopen("/sys/devices/platform/musb_hdrc/connect", "r"))) {
         if (fgets(state, sizeof(state), fp)) {
             mUsbConnected = !strncmp(state, "1", 1);
         } else {
@@ -184,6 +192,16 @@ void VolumeManager::handleSwitchEvent(NetlinkEvent *evt) {
         bool newAvailable = massStorageAvailable();
         if (newAvailable != oldAvailable) {
             notifyUmsAvailable(newAvailable);
+        }
+    }
+    else if (!strcmp(name, "usb_mass_storage")) {
+        mUsbConnected = !strcmp(state, "online");
+        SLOGD("USB %s", mUsbConnected ? "connected" : "disconnected");
+        bool newAvailable = mUsbConnected; //massStorageAvailable();
+        SLOGD("massStorageAvailable: %d %d", mUsbMassStorageEnabled, mUsbConnected);
+        if (newAvailable != oldAvailable) {
+            notifyUmsAvailable(newAvailable);
+            oldAvailable = newAvailable;
         }
     } else {
         SLOGW("Ignoring unknown switch '%s'", name);
@@ -1053,7 +1071,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
     char nodepath[255];
     snprintf(nodepath,
              sizeof(nodepath), "/dev/block/vold/%d:%d",
-             MAJOR(d), MINOR(d));
+             MAJOR(d), MINOR(d) + umsMinorAdjustment);
 
     if ((fd = open(lunFile,
                    O_WRONLY)) < 0) {
@@ -1062,7 +1080,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
     }
 
     if (write(fd, nodepath, strlen(nodepath)) < 0) {
-        SLOGE("Unable to write to ums lunfile (%s)", strerror(errno));
+        SLOGE("Unable to write to ums lunfile (%s) value %s", strerror(errno), nodepath);
         close(fd);
         return -1;
     }
@@ -1113,7 +1131,7 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
 
     char ch = 0;
     if (write(fd, &ch, 1) < 0) {
-        SLOGE("Unable to write to ums lunfile (%s)", strerror(errno));
+        SLOGE("Unable to write to ums lunfile (%s) value 0", strerror(errno));
         close(fd);
         return -1;
     }
