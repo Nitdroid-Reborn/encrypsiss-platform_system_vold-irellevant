@@ -95,9 +95,9 @@ void VolumeManager::readInitialState() {
     /*
      * Read the initial USB connected state
      */
-    if ((fp = fopen("/sys/devices/platform/musb_hdrc/mA", "r"))) {
+    if ((fp = fopen("/sys/devices/platform/musb_hdrc/connect", "r"))) {
         if (fgets(state, sizeof(state), fp)) {
-            mUsbConnected = ( strncmp(state, "0", 1) != 0 );
+            mUsbConnected = !strncmp(state, "1", 1);
         } else {
             SLOGE("Failed to read usb_configuration switch (%s)", strerror(errno));
         }
