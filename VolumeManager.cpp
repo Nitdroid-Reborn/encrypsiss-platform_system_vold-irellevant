@@ -196,12 +196,12 @@ void VolumeManager::handleSwitchEvent(NetlinkEvent *evt) {
     }
     else if (!strcmp(name, "usb_mass_storage")) {
         mUsbConnected = !strcmp(state, "online");
-        SLOGD("USB/UMS %s", mUsbConnected ? "connected" : "disconnected");
+        SLOGD("USB %s", mUsbConnected ? "connected" : "disconnected");
         bool newAvailable = mUsbConnected; //massStorageAvailable();
         SLOGD("massStorageAvailable: %d %d", mUsbMassStorageEnabled, mUsbConnected);
-        if (mUsbConnected != oldAvailable) {
-            notifyUmsAvailable(mUsbConnected);
-            oldAvailable = mUsbConnected;
+        if (newAvailable != oldAvailable) {
+            notifyUmsAvailable(newAvailable);
+            oldAvailable = newAvailable;
         }
     } else {
         SLOGW("Ignoring unknown switch '%s'", name);

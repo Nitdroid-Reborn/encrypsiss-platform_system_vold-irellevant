@@ -127,7 +127,7 @@ private:
     Volume *lookupVolume(const char *label);
     bool isMountpointMounted(const char *mp);
 
-    inline bool massStorageAvailable() const { return /*mUsbMassStorageEnabled*/ 1 && mUsbConnected; }
+    inline bool massStorageAvailable() const { return mUsbMassStorageEnabled && mUsbConnected; }
     void notifyUmsAvailable(bool available);
 };
 #endif
