@@ -41,6 +41,9 @@
 #include "Devmapper.h"
 #include "Process.h"
 #include "Asec.h"
+#include "cryptfs.h"
+
+#define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
 
 VolumeManager *VolumeManager::sInstance = NULL;
 static const char lunFile[] = "/sys/devices/platform/musb_hdrc/gadget/lun0/file";
@@ -57,8 +60,6 @@ VolumeManager::VolumeManager() {
     mVolumes = new VolumeCollection();
     mActiveContainers = new AsecIdCollection();
     mBroadcaster = NULL;
-    mUsbMassStorageEnabled = false;
-    mUsbConnected = false;
     mUmsSharingCount = 0;
     mSavedDirtyRatio = -1;
     // set dirty ratio to 0 when UMS is active
@@ -83,7 +84,7 @@ void VolumeManager::readInitialState() {
     if ((fp = fopen("/sys/devices/virtual/usb_composite/usb_mass_storage/enable", "r"))) {
         if (fgets(state, sizeof(state), fp)) {
             //mUsbMassStorageEnabled = !strncmp(state, "1", 1);
-            mUsbMassStorageEnabled = true;
+            //mUsbMassStorageEnabled = true;
         } else {
             SLOGE("Failed to read usb_mass_storage enabled state (%s)", strerror(errno));
         }
@@ -97,7 +98,7 @@ void VolumeManager::readInitialState() {
      */
     if ((fp = fopen("/sys/devices/platform/musb_hdrc/connect", "r"))) {
         if (fgets(state, sizeof(state), fp)) {
-            mUsbConnected = !strncmp(state, "1", 1);
+            //mUsbConnected = !strncmp(state, "1", 1);
         } else {
             SLOGE("Failed to read usb_configuration switch (%s)", strerror(errno));
         }
@@ -105,6 +106,7 @@ void VolumeManager::readInitialState() {
     } else {
         SLOGD("usb_configuration switch is not enabled in the kernel");
     }
+    //mVolManagerDisabled = 0;
 }
 
 VolumeManager::~VolumeManager() {
@@ -165,7 +167,8 @@ int VolumeManager::addVolume(Volume *v) {
     return 0;
 }
 
-void VolumeManager::notifyUmsAvailable(bool available) {
+//<<<<<<< HEAD
+/*void VolumeManager::notifyUmsAvailable(bool available) {
     char msg[255];
 
     snprintf(msg, sizeof(msg), "Share method ums now %s",
@@ -226,7 +229,9 @@ void VolumeManager::handleUsbCompositeEvent(NetlinkEvent *evt) {
         }
     }
 }
-
+*/
+//=======
+//>>>>>>> android-4.0.1_r1
 void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
     const char *devpath = evt->findParam("DEVPATH");
 
@@ -245,7 +250,7 @@ void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
 
     if (!hit) {
 #ifdef NETLINK_DEBUG
-        SLOGW("No volumes handled block event for '%s'", devpath);
+      ("No volumes handled block event for '%s'", devpath);
 #endif
     }
 }
@@ -270,6 +275,11 @@ int VolumeManager::formatVolume(const char *label) {
 
     if (!v) {
         errno = ENOENT;
+        return -1;
+    }
+
+    if (mVolManagerDisabled) {
+        errno = EBUSY;
         return -1;
     }
 
@@ -305,6 +315,20 @@ int VolumeManager::getAsecMountPath(const char *id, char *buffer, int maxlen) {
     }
 
     snprintf(buffer, maxlen, "%s/%s", Volume::ASECDIR, id);
+    return 0;
+}
+
+int VolumeManager::getAsecFilesystemPath(const char *id, char *buffer, int maxlen) {
+    char asecFileName[255];
+    snprintf(asecFileName, sizeof(asecFileName), "%s/%s.asec", Volume::SEC_ASECDIR, id);
+
+    memset(buffer, 0, maxlen);
+    if (access(asecFileName, F_OK)) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    snprintf(buffer, maxlen, "%s", asecFileName);
     return 0;
 }
 
@@ -981,17 +1005,6 @@ int VolumeManager::listMountedObbs(SocketClient* cli) {
     return 0;
 }
 
-int VolumeManager::shareAvailable(const char *method, bool *avail) {
-
-    if (strcmp(method, "ums")) {
-        errno = ENOSYS;
-        return -1;
-    }
-
-    *avail = massStorageAvailable();
-    return 0;
-}
-
 int VolumeManager::shareEnabled(const char *label, const char *method, bool *enabled) {
     Volume *v = lookupVolume(label);
 
@@ -1009,24 +1022,6 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
         *enabled = false;
     } else {
         *enabled = true;
-    }
-    return 0;
-}
-
-int VolumeManager::simulate(const char *cmd, const char *arg) {
-
-    if (!strcmp(cmd, "ums")) {
-        if (!strcmp(arg, "connect")) {
-            notifyUmsAvailable(true);
-        } else if (!strcmp(arg, "disconnect")) {
-            notifyUmsAvailable(false);
-        } else {
-            errno = EINVAL;
-            return -1;
-        }
-    } else {
-        errno = EINVAL;
-        return -1;
     }
     return 0;
 }
@@ -1060,6 +1055,11 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
+    if (mVolManagerDisabled) {
+        errno = EBUSY;
+        return -1;
+    }
+
     dev_t d = v->getShareDevice();
     if ((MAJOR(d) == 0) && (MINOR(d) == 0)) {
         // This volume does not support raw disk access
@@ -1073,8 +1073,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
              sizeof(nodepath), "/dev/block/vold/%d:%d",
              MAJOR(d), MINOR(d) + umsMinorAdjustment);
 
-    if ((fd = open(lunFile,
-                   O_WRONLY)) < 0) {
+    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
         SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
         return -1;
     }
@@ -1124,7 +1123,7 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
     }
 
     int fd;
-    if ((fd = open(lunFile, O_WRONLY)) < 0) {
+    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
         SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
         return -1;
     }
@@ -1151,7 +1150,53 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
     return 0;
 }
 
-int VolumeManager::unmountVolume(const char *label, bool force) {
+extern "C" int vold_disableVol(const char *label) {
+    VolumeManager *vm = VolumeManager::Instance();
+    vm->disableVolumeManager();
+    vm->unshareVolume(label, "ums");
+    return vm->unmountVolume(label, true, false);
+}
+
+extern "C" int vold_getNumDirectVolumes(void) {
+    VolumeManager *vm = VolumeManager::Instance();
+    return vm->getNumDirectVolumes();
+}
+
+int VolumeManager::getNumDirectVolumes(void) {
+    VolumeCollection::iterator i;
+    int n=0;
+
+    for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
+        if ((*i)->getShareDevice() != (dev_t)0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+extern "C" int vold_getDirectVolumeList(struct volume_info *vol_list) {
+    VolumeManager *vm = VolumeManager::Instance();
+    return vm->getDirectVolumeList(vol_list);
+}
+
+int VolumeManager::getDirectVolumeList(struct volume_info *vol_list) {
+    VolumeCollection::iterator i;
+    int n=0;
+    dev_t d;
+
+    for (i = mVolumes->begin(); i != mVolumes->end(); ++i) {
+        if ((d=(*i)->getShareDevice()) != (dev_t)0) {
+            (*i)->getVolInfo(&vol_list[n]);
+            snprintf(vol_list[n].blk_dev, sizeof(vol_list[n].blk_dev),
+                     "/dev/block/vold/%d:%d",MAJOR(d), MINOR(d));
+            n++;
+        }
+    }
+
+    return 0;
+}
+
+int VolumeManager::unmountVolume(const char *label, bool force, bool revert) {
     Volume *v = lookupVolume(label);
 
     if (!v) {
@@ -1168,12 +1213,12 @@ int VolumeManager::unmountVolume(const char *label, bool force) {
         SLOGW("Attempt to unmount volume which isn't mounted (%d)\n",
              v->getState());
         errno = EBUSY;
-        return -1;
+        return UNMOUNT_NOT_MOUNTED_ERR;
     }
 
     cleanupAsec(v, force);
 
-    return v->unmountVol(force);
+    return v->unmountVol(force, revert);
 }
 
 /*

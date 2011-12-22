@@ -1,10 +1,3 @@
-BUILD_VOLD2 := false
-ifneq ($(TARGET_SIMULATOR),true)
-    BUILD_VOLD2 := true
-endif
-
-ifeq ($(BUILD_VOLD2),true)
-
 LOCAL_PATH:= $(call my-dir)
 
 common_src_files := \
@@ -21,16 +14,19 @@ common_src_files := \
 	Loop.cpp \
 	Devmapper.cpp \
 	ResponseCode.cpp \
-	Xwarp.cpp
+	Xwarp.cpp \
+	cryptfs.c
 
 common_c_includes := \
 	$(KERNEL_HEADERS) \
+	system/extras/ext4_utils \
 	external/openssl/include
 
 common_shared_libraries := \
 	libsysutils \
 	libcutils \
 	libdiskconfig \
+	libhardware_legacy \
 	libcrypto
 
 include $(CLEAR_VARS)
@@ -76,5 +72,3 @@ LOCAL_CFLAGS :=
 LOCAL_SHARED_LIBRARIES := libcutils
 
 include $(BUILD_EXECUTABLE)
-
-endif # ifeq ($(BUILD_VOLD,true)

@@ -15,6 +15,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -22,6 +23,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <linux/kdev_t.h>
 
@@ -126,7 +128,7 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
     char filename[256];
 
     for (i = 0; i < LOOP_MAX; i++) {
-        struct loop_info li;
+        struct loop_info64 li;
         int rc;
 
         sprintf(filename, "/dev/block/loop%d", i);
@@ -149,7 +151,7 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
             return -1;
         }
 
-        rc = ioctl(fd, LOOP_GET_STATUS, &li);
+        rc = ioctl(fd, LOOP_GET_STATUS64, &li);
         if (rc < 0 && errno == ENXIO)
             break;
 
@@ -188,8 +190,8 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
     struct loop_info64 li;
 
     memset(&li, 0, sizeof(li));
-    strncpy((char*) li.lo_crypt_name, id, LO_NAME_SIZE);
-    strncpy((char*) li.lo_file_name, loopFile, LO_NAME_SIZE);
+    strlcpy((char*) li.lo_crypt_name, id, LO_NAME_SIZE);
+    strlcpy((char*) li.lo_file_name, loopFile, LO_NAME_SIZE);
 
     if (ioctl(fd, LOOP_SET_STATUS64, &li) < 0) {
         SLOGE("Error setting loopback status (%s)", strerror(errno));

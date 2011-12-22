@@ -19,6 +19,7 @@
 
 #include <pthread.h>
 
+#ifdef __cplusplus
 #include <utils/List.h>
 #include <sysutils/SocketListener.h>
 
@@ -58,14 +59,13 @@ private:
 
     VolumeCollection      *mVolumes;
     AsecIdCollection      *mActiveContainers;
-    bool                   mUsbMassStorageEnabled;
-    bool                   mUsbConnected;
     bool                   mDebug;
 
     // for adjusting /proc/sys/vm/dirty_ratio when UMS is active
     int                    mUmsSharingCount;
     int                    mSavedDirtyRatio;
     int                    mUmsDirtyRatio;
+    int                    mVolManagerDisabled;
 
 public:
     virtual ~VolumeManager();
@@ -74,20 +74,17 @@ public:
     int stop();
 
     void handleBlockEvent(NetlinkEvent *evt);
-    void handleSwitchEvent(NetlinkEvent *evt);
-    void handleUsbCompositeEvent(NetlinkEvent *evt);
 
     int addVolume(Volume *v);
 
     int listVolumes(SocketClient *cli);
     int mountVolume(const char *label);
-    int unmountVolume(const char *label, bool force);
+    int unmountVolume(const char *label, bool force, bool revert);
     int shareVolume(const char *label, const char *method);
     int unshareVolume(const char *label, const char *method);
-    int shareAvailable(const char *method, bool *avail);
     int shareEnabled(const char *path, const char *method, bool *enabled);
-    int simulate(const char *cmd, const char *arg);
     int formatVolume(const char *label);
+    void disableVolumeManager(void) { mVolManagerDisabled = 1; }
 
     /* ASEC */
     int createAsec(const char *id, unsigned numSectors, const char *fstype,
@@ -98,6 +95,7 @@ public:
     int unmountAsec(const char *id, bool force);
     int renameAsec(const char *id1, const char *id2);
     int getAsecMountPath(const char *id, char *buffer, int maxlen);
+    int getAsecFilesystemPath(const char *id, char *buffer, int maxlen);
 
     /* Loopback images */
     int listMountedObbs(SocketClient* cli);
@@ -121,13 +119,24 @@ public:
 
     static char *asecHash(const char *id, char *buffer, size_t len);
 
+    Volume *lookupVolume(const char *label);
+    int getNumDirectVolumes(void);
+    int getDirectVolumeList(struct volume_info *vol_list);
+
 private:
     VolumeManager();
     void readInitialState();
-    Volume *lookupVolume(const char *label);
     bool isMountpointMounted(const char *mp);
-
-    inline bool massStorageAvailable() const { return mUsbMassStorageEnabled && mUsbConnected; }
-    void notifyUmsAvailable(bool available);
 };
+
+extern "C" {
+#endif /* __cplusplus */
+#define UNMOUNT_NOT_MOUNTED_ERR -2
+    int vold_disableVol(const char *label);
+    int vold_getNumDirectVolumes(void);
+    int vold_getDirectVolumeList(struct volume_info *v);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

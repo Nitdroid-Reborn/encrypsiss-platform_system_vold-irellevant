@@ -25,12 +25,16 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/param.h>
 
 #include <linux/kdev_t.h>
+#include <linux/fs.h>
 
 #include <cutils/properties.h>
 
 #include <diskconfig/diskconfig.h>
+
+#include <private/android_filesystem_config.h>
 
 #define LOG_TAG "Vold"
 
@@ -41,6 +45,7 @@
 #include "ResponseCode.h"
 #include "Fat.h"
 #include "Process.h"
+#include "cryptfs.h"
 
 extern "C" void dos_partition_dec(void const *pp, struct dos_partition *d);
 extern "C" void dos_partition_enc(void *pp, struct dos_partition *d);
@@ -111,6 +116,7 @@ Volume::Volume(VolumeManager *vm, const char *label, const char *mount_point) {
     mState = Volume::State_Init;
     mCurrentlyMountedKdev = -1;
     mPartIdx = -1;
+    mRetryMount = false;
 }
 
 Volume::~Volume() {
@@ -169,6 +175,10 @@ void Volume::setState(int state) {
         return;
     }
 
+    if ((oldState == Volume::State_Pending) && (state != Volume::State_Idle)) {
+        mRetryMount = false;
+    }
+
     mState = state;
 
     SLOGD("Volume %s state changing %d (%s) -> %d (%s)", mLabel,
@@ -218,6 +228,7 @@ int Volume::formatVol() {
 
     setState(Volume::State_Formatting);
 
+    int ret = -1;
     // Only initialize the MBR if we are formatting the entire device
     if (formatEntireDevice) {
         sprintf(devicePath, "/dev/block/vold/%d:%d",
@@ -241,10 +252,11 @@ int Volume::formatVol() {
         goto err;
     }
 
-    setState(Volume::State_Idle);
-    return 0;
+    ret = 0;
+
 err:
-    return -1;
+    setState(Volume::State_Idle);
+    return ret;
 }
 
 bool Volume::isMountpointMounted(const char *path) {
@@ -277,8 +289,21 @@ int Volume::mountVol() {
     dev_t deviceNodes[4];
     int n, i, rc = 0;
     char errmsg[255];
+    const char* externalStorage = getenv("EXTERNAL_STORAGE");
+    bool primaryStorage = externalStorage && !strcmp(getMountpoint(), externalStorage);
+    char decrypt_state[PROPERTY_VALUE_MAX];
+    char crypto_state[PROPERTY_VALUE_MAX];
+    char encrypt_progress[PROPERTY_VALUE_MAX];
+    int flags;
 
-    if (getState() == Volume::State_NoMedia) {
+    property_get("vold.decrypt", decrypt_state, "");
+    property_get("vold.encrypt_progress", encrypt_progress, "");
+
+    /* Don't try to mount the volumes if we have not yet entered the disk password
+     * or are in the process of encrypting.
+     */
+    if ((getState() == Volume::State_NoMedia) ||
+        ((!strcmp(decrypt_state, "1") || encrypt_progress[0]) && primaryStorage)) {
         snprintf(errmsg, sizeof(errmsg),
                  "Volume %s %s mount failed - no media",
                  getLabel(), getMountpoint());
@@ -289,6 +314,9 @@ int Volume::mountVol() {
         return -1;
     } else if (getState() != Volume::State_Idle) {
         errno = EBUSY;
+        if (getState() == Volume::State_Pending) {
+            mRetryMount = true;
+        }
         return -1;
     }
 
@@ -303,6 +331,56 @@ int Volume::mountVol() {
     if (!n) {
         SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
         return -1;
+    }
+
+    /* If we're running encrypted, and the volume is marked as encryptable and nonremovable,
+     * and vold is asking to mount the primaryStorage device, then we need to decrypt
+     * that partition, and update the volume object to point to it's new decrypted
+     * block device
+     */
+    property_get("ro.crypto.state", crypto_state, "");
+    flags = getFlags();
+    if (primaryStorage &&
+        ((flags & (VOL_NONREMOVABLE | VOL_ENCRYPTABLE))==(VOL_NONREMOVABLE | VOL_ENCRYPTABLE)) &&
+        !strcmp(crypto_state, "encrypted") && !isDecrypted()) {
+       char new_sys_path[MAXPATHLEN];
+       char nodepath[256];
+       int new_major, new_minor;
+
+       if (n != 1) {
+           /* We only expect one device node returned when mounting encryptable volumes */
+           SLOGE("Too many device nodes returned when mounting %d\n", getMountpoint());
+           return -1;
+       }
+
+       if (cryptfs_setup_volume(getLabel(), MAJOR(deviceNodes[0]), MINOR(deviceNodes[0]),
+                                new_sys_path, sizeof(new_sys_path),
+                                &new_major, &new_minor)) {
+           SLOGE("Cannot setup encryption mapping for %d\n", getMountpoint());
+           return -1;
+       }
+       /* We now have the new sysfs path for the decrypted block device, and the
+        * majore and minor numbers for it.  So, create the device, update the
+        * path to the new sysfs path, and continue.
+        */
+        snprintf(nodepath,
+                 sizeof(nodepath), "/dev/block/vold/%d:%d",
+                 new_major, new_minor);
+        if (createDeviceNode(nodepath, new_major, new_minor)) {
+            SLOGE("Error making device node '%s' (%s)", nodepath,
+                                                       strerror(errno));
+        }
+
+        // Todo: Either create sys filename from nodepath, or pass in bogus path so
+        //       vold ignores state changes on this internal device.
+        updateDeviceInfo(nodepath, new_major, new_minor);
+
+        /* Get the device nodes again, because they just changed */
+        n = getDeviceNodes((dev_t *) &deviceNodes, 4);
+        if (!n) {
+            SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
+            return -1;
+        }
     }
 
     for (i = 0; i < n; i++) {
@@ -333,8 +411,18 @@ int Volume::mountVol() {
          * muck with it before exposing it to non priviledged users.
          */
         errno = 0;
+        int gid;
+
+        if (primaryStorage) {
+            // Special case the primary SD card.
+            // For this we grant write access to the SDCARD_RW group.
+            gid = AID_SDCARD_RW;
+        } else {
+            // For secondary external storage we keep things locked up.
+            gid = AID_MEDIA_RW;
+        }
         if (Fat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
-                1000, 1015, 0702, true)) {
+                AID_SYSTEM, gid, 0702, true)) {
             SLOGE("%s failed to mount via VFAT (%s)\n", devicePath, strerror(errno));
             continue;
         }
@@ -343,7 +431,8 @@ int Volume::mountVol() {
 
         protectFromAutorunStupidity();
 
-        if (createBindMounts()) {
+        // only create android_secure on primary storage
+        if (primaryStorage && createBindMounts()) {
             SLOGE("Failed to create bindmounts (%s)", strerror(errno));
             umount("/mnt/secure/staging");
             setState(Volume::State_Idle);
@@ -502,13 +591,13 @@ int Volume::doUnmount(const char *path, bool force) {
     return -1;
 }
 
-int Volume::unmountVol(bool force) {
+int Volume::unmountVol(bool force, bool revert) {
     int i, rc;
 
     if (getState() != Volume::State_Mounted) {
         SLOGE("Volume %s unmount request when not mounted", getLabel());
         errno = EINVAL;
-        return -1;
+        return UNMOUNT_NOT_MOUNTED_ERR;
     }
 
     setState(Volume::State_Unmounting);
@@ -555,6 +644,16 @@ int Volume::unmountVol(bool force) {
     }
 
     SLOGI("%s unmounted sucessfully", getMountpoint());
+
+    /* If this is an encrypted volume, and we've been asked to undo
+     * the crypto mapping, then revert the dm-crypt mapping, and revert
+     * the device info to the original values.
+     */
+    if (revert && isDecrypted()) {
+        cryptfs_revert_volume(getLabel());
+        revertDeviceInfo();
+        SLOGI("Encrypted volume %s reverted successfully", getMountpoint());
+    }
 
     setState(Volume::State_Idle);
     mCurrentlyMountedKdev = -1;

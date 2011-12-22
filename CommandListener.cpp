@@ -22,11 +22,13 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 
 #define LOG_TAG "VoldCmdListener"
 #include <cutils/log.h>
 
 #include <sysutils/SocketClient.h>
+#include <private/android_filesystem_config.h>
 
 #include "CommandListener.h"
 #include "VolumeManager.h"
@@ -35,6 +37,7 @@
 #include "Xwarp.h"
 #include "Loop.h"
 #include "Devmapper.h"
+#include "cryptfs.h"
 
 CommandListener::CommandListener() :
                  FrameworkListener("vold") {
@@ -42,9 +45,9 @@ CommandListener::CommandListener() :
     registerCmd(new VolumeCmd());
     registerCmd(new AsecCmd());
     registerCmd(new ObbCmd());
-    registerCmd(new ShareCmd());
     registerCmd(new StorageCmd());
     registerCmd(new XwarpCmd());
+    registerCmd(new CryptfsCmd());
 }
 
 void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
@@ -54,7 +57,7 @@ void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
     memset(buffer, 0, sizeof(buffer));
     int i;
     for (i = 0; i < argc; i++) {
-        int len = strlen(argv[i]) + 1; // Account for space
+        unsigned int len = strlen(argv[i]) + 1; // Account for space
         if (i == argObscure) {
             len += 2; // Account for {}
         }
@@ -136,16 +139,22 @@ int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
         }
         rc = vm->mountVolume(argv[2]);
     } else if (!strcmp(argv[1], "unmount")) {
-        if (argc < 3 || argc > 4 || (argc == 4 && strcmp(argv[3], "force"))) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume unmount <path> [force]", false);
+        if (argc < 3 || argc > 4 ||
+           ((argc == 4 && strcmp(argv[3], "force")) &&
+            (argc == 4 && strcmp(argv[3], "force_and_revert")))) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume unmount <path> [force|force_and_revert]", false);
             return 0;
         }
 
         bool force = false;
+        bool revert = false;
         if (argc >= 4 && !strcmp(argv[3], "force")) {
             force = true;
+        } else if (argc >= 4 && !strcmp(argv[3], "force_and_revert")) {
+            force = true;
+            revert = true;
         }
-        rc = vm->unmountVolume(argv[2], force);
+        rc = vm->unmountVolume(argv[2], force, revert);
     } else if (!strcmp(argv[1], "format")) {
         if (argc != 3) {
             cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: volume format <path>", false);
@@ -192,39 +201,6 @@ int CommandListener::VolumeCmd::runCommand(SocketClient *cli,
         int erno = errno;
         rc = ResponseCode::convertFromErrno();
         cli->sendMsg(rc, "volume operation failed", true);
-    }
-
-    return 0;
-}
-
-CommandListener::ShareCmd::ShareCmd() :
-                 VoldCommand("share") {
-}
-
-int CommandListener::ShareCmd::runCommand(SocketClient *cli,
-                                                      int argc, char **argv) {
-    dumpArgs(argc, argv, -1);
-
-    if (argc < 2) {
-        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing Argument", false);
-        return 0;
-    }
-
-    VolumeManager *vm = VolumeManager::Instance();
-    int rc = 0;
-
-    if (!strcmp(argv[1], "status")) {
-        bool avail = false;
-
-        if (vm->shareAvailable(argv[2], &avail)) {
-            cli->sendMsg(
-                    ResponseCode::OperationFailed, "Failed to determine share availability", true);
-        } else {
-            cli->sendMsg(ResponseCode::ShareStatusResult,
-                    (avail ? "Share available" : "Share unavailable"), false);
-        }
-    } else {
-        cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown share cmd", false);
     }
 
     return 0;
@@ -383,6 +359,18 @@ int CommandListener::AsecCmd::runCommand(SocketClient *cli,
             cli->sendMsg(ResponseCode::AsecPathResult, path, false);
             return 0;
         }
+    } else if (!strcmp(argv[1], "fspath")) {
+        dumpArgs(argc, argv, -1);
+        if (argc != 3) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: asec fspath <container-id>", false);
+            return 0;
+        }
+        char path[255];
+
+        if (!(rc = vm->getAsecFilesystemPath(argv[2], path, sizeof(path)))) {
+            cli->sendMsg(ResponseCode::AsecPathResult, path, false);
+            return 0;
+        }
     } else {
         dumpArgs(argc, argv, -1);
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown asec cmd", false);
@@ -501,6 +489,80 @@ int CommandListener::XwarpCmd::runCommand(SocketClient *cli,
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown storage cmd", false);
     }
+
+    return 0;
+}
+
+CommandListener::CryptfsCmd::CryptfsCmd() :
+                 VoldCommand("cryptfs") {
+}
+
+int CommandListener::CryptfsCmd::runCommand(SocketClient *cli,
+                                                      int argc, char **argv) {
+    if ((cli->getUid() != 0) && (cli->getUid() != AID_SYSTEM)) {
+        cli->sendMsg(ResponseCode::CommandNoPermission, "No permission to run cryptfs commands", false);
+        return 0;
+    }
+
+    if (argc < 2) {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing Argument", false);
+        return 0;
+    }
+
+    int rc = 0;
+
+    if (!strcmp(argv[1], "checkpw")) {
+        if (argc != 3) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs checkpw <passwd>", false);
+            return 0;
+        }
+        dumpArgs(argc, argv, 2);
+        rc = cryptfs_check_passwd(argv[2]);
+    } else if (!strcmp(argv[1], "restart")) {
+        if (argc != 2) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs restart", false);
+            return 0;
+        }
+        dumpArgs(argc, argv, -1);
+        rc = cryptfs_restart();
+    } else if (!strcmp(argv[1], "cryptocomplete")) {
+        if (argc != 2) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs cryptocomplete", false);
+            return 0;
+        }
+        dumpArgs(argc, argv, -1);
+        rc = cryptfs_crypto_complete();
+    } else if (!strcmp(argv[1], "enablecrypto")) {
+        if ( (argc != 4) || (strcmp(argv[2], "wipe") && strcmp(argv[2], "inplace")) ) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs enablecrypto <wipe|inplace> <passwd>", false);
+            return 0;
+        }
+        dumpArgs(argc, argv, 3);
+        rc = cryptfs_enable(argv[2], argv[3]);
+    } else if (!strcmp(argv[1], "changepw")) {
+        if (argc != 3) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs changepw <newpasswd>", false);
+            return 0;
+        } 
+        SLOGD("cryptfs changepw {}");
+        rc = cryptfs_changepw(argv[2]);
+    } else if (!strcmp(argv[1], "verifypw")) {
+        if (argc != 3) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Usage: cryptfs verifypw <passwd>", false);
+            return 0;
+        }
+        SLOGD("cryptfs verifypw {}");
+        rc = cryptfs_verify_passwd(argv[2]);
+    } else {
+        dumpArgs(argc, argv, -1);
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown cryptfs cmd", false);
+    }
+
+    // Always report that the command succeeded and return the error code.
+    // The caller will check the return value to see what the error was.
+    char msg[255];
+    snprintf(msg, sizeof(msg), "%d", rc);
+    cli->sendMsg(ResponseCode::CommandOkay, msg, false);
 
     return 0;
 }
